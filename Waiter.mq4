@@ -10,19 +10,57 @@
 #property strict
 
 //--- input parameters
-input double   min_profit =  0;        // minimum profit from current balance (0.005 = 0.5%)
-input int      sl_tp_ratio = 20;       // stop loss level to take profit level
-input int      trailing_percent = 80;  // trailing percent 1...99
 input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
-input int      wait_minutes = 10;      // waiting minutes before start
+input double   trailing_level =  0.5;  // trailing level (0...1)
 
 //--- global variables
+double         adjust;                 // value to adjust stop/limit orders by
 double         lot;                    // current lot size
 double         max_price;              // maximum price since last trade
 double         min_price;              // minimum price since last trade
 int            order_type1;            // first order type
 int            order_type2;            // second order type
 datetime       reset_time;             // time when max_price and min_price were reset
+
+//+------------------------------------------------------------------+
+//| Adjust an order with given ticket.                               |
+//+------------------------------------------------------------------+
+void adjust_order(int ticket)
+  {
+   if(OrderSelect(ticket, SELECT_BY_TICKET))
+     {
+      switch(OrderType())
+        {
+         case OP_BUYSTOP:
+         case OP_SELLLIMIT:
+            if(adjust < 0)
+               if(OrderModify(ticket, OrderOpenPrice() + adjust, 0, 0, 0)) {}
+            break;
+         case OP_SELLSTOP:
+         case OP_BUYLIMIT:
+            if(0 < adjust)
+               if(OrderModify(ticket, OrderOpenPrice() + adjust, 0, 0, 0)) {}
+            break;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Adjust the orders of given types.                                |
+//+------------------------------------------------------------------+
+void adjust_orders(int type1, int type2)
+  {
+   for(int i = 0; i < OrdersTotal(); i++)
+     {
+      if(OrderSelect(i, SELECT_BY_POS))
+        {
+         if((OrderType() == type1) || (OrderType() == type2))
+           {
+            adjust_order(OrderTicket());
+           }
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
 //| Delete the orders of given types. Changes last_trade if deleted. |
@@ -57,7 +95,7 @@ int OnInit()
    lot = MarketInfo(_Symbol, MODE_MINLOT);
    order_type1 = use_stop_order ? OP_BUYSTOP : OP_SELLLIMIT;
    order_type2 = use_stop_order ? OP_SELLSTOP : OP_BUYLIMIT;
-   reset_max_min_price_time();
+   reset_adjust_max_min_price_time();
 //---
    return(INIT_SUCCEEDED);
   }
@@ -76,7 +114,7 @@ void OnTick()
          switch(total_orders(OP_BUY, OP_SELL))
            {
             case 0:
-               if(0 < wait_time() || price_too_close())
+               if(price_too_close())
                   return;
                set_lot_size();
                send_orders(order_type1, order_type2);
@@ -84,12 +122,17 @@ void OnTick()
             case 1:
             case 2:
                trail_orders(OP_BUY, OP_SELL);
+               reset_adjust_max_min_price_time();
                break;
            }
          break;
       case 1:
          delete_orders(order_type1, order_type2);
-         reset_max_min_price_time();
+         reset_adjust_max_min_price_time();
+         break;
+      case 2:
+         if(adjust != 0)
+            adjust_orders(order_type1, order_type2);
          break;
      }
   }
@@ -97,8 +140,9 @@ void OnTick()
 //+------------------------------------------------------------------+
 //| Reset max_price, min_price, and reset_time                       |
 //+------------------------------------------------------------------+
-void reset_max_min_price_time()
+void reset_adjust_max_min_price_time()
   {
+   adjust = 0;
    max_price = Ask;
    min_price = Bid;
    reset_time = TimeCurrent();
@@ -117,10 +161,8 @@ string padded_number(int number)
 //+------------------------------------------------------------------+
 bool price_too_close()
   {
-   double price_spread = max_price - min_price;
-   double top_border = min_price + 2 * price_spread / 3;
-   double bottom_border = min_price + price_spread / 3;
-   return Bid < bottom_border || top_border < Ask;
+   double mid_price = (max_price + min_price) / 2;
+   return Ask + Point < mid_price || mid_price < Bid - Point || (max_price - min_price) / Point < MarketInfo(_Symbol, MODE_SPREAD) + MarketInfo(_Symbol, MODE_STOPLEVEL);
   }
 
 //+------------------------------------------------------------------+
@@ -128,20 +170,21 @@ bool price_too_close()
 //+------------------------------------------------------------------+
 void send_order(int type)
   {
-   double price;
-   double sign = use_stop_order ? 1 : -1;
-   double sl = sign * (max_price - min_price);
    switch(type)
      {
       case OP_BUYSTOP:
       case OP_SELLLIMIT:
-         price = max_price;
-         if(0 <= OrderSend(Symbol(), type, lot, price, 0, price - sl, 0)) {}
+         if(0 <= OrderSend(_Symbol, type, lot, max_price, 0, 0, 0))
+           {
+            max_price = Ask;
+           }
          break;
       case OP_SELLSTOP:
       case OP_BUYLIMIT:
-         price = min_price;
-         if(0 <= OrderSend(Symbol(), type, lot, price, 0, price + sl, 0)) {}
+         if(0 <= OrderSend(_Symbol, type, lot, min_price, 0, 0, 0))
+           {
+            min_price = Bid;
+           }
          break;
      }
   }
@@ -171,9 +214,10 @@ void show_comments()
    string space = "\n                                             ";
    string comment = space + "Max price = " + DoubleToString(max_price, Digits) + ", Ask = " + DoubleToString(Ask, Digits);
    comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", Bid = " + DoubleToString(Bid, Digits);
+   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits) + ", for Ask/Bid = " + DoubleToString((Ask + Bid) / 2, Digits);
+   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point)) + ", for Ask/Bid = " + IntegerToString((int)((Ask - Bid) / Point));
+   comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD)) + ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
    comment += space + "Time since reset = " + formatted_time(time_since_reset());
-   if(0 < wait_time())
-      comment += ", wait time = " + formatted_time(wait_time());
    if(price_too_close())
       comment += space + "Price too close";
    Comment(comment);
@@ -211,31 +255,25 @@ int total_orders(int type1, int type2)
 //+------------------------------------------------------------------+
 void trail_order(int ticket)
   {
-   double spread = Point * MarketInfo(_Symbol, MODE_SPREAD);
-   double stoploss;
-   double trailing_level = trailing_percent / 100;
+   double new_sl;
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
-      double profit = (AccountEquity() - AccountBalance()) * trailing_level;
-      bool profitable = min_profit * AccountBalance() < profit;
       switch(OrderType())
         {
          case OP_BUY:
-            stoploss = OrderOpenPrice() + trailing_level * (Bid - OrderOpenPrice());
-            stoploss = Point * MathRound(stoploss / Point);
-            stoploss = MathMin(stoploss, Bid - spread);
-            if((OrderOpenPrice() < stoploss) && (OrderStopLoss() < stoploss) && profitable)
+            new_sl = OrderOpenPrice() + trailing_level * (Bid - OrderOpenPrice());
+            new_sl = Point * MathRound(new_sl / Point);
+            if((OrderOpenPrice() < new_sl) && (OrderStopLoss() < new_sl))
               {
-               if(OrderModify(ticket, OrderOpenPrice(), stoploss, 0.0, 0)) {}
+               if(OrderModify(ticket, OrderOpenPrice(), new_sl, 0.0, 0)) {}
               }
             break;
          case OP_SELL:
-            stoploss = OrderOpenPrice() - trailing_level * (OrderOpenPrice() - Ask);
-            stoploss = Point * MathRound(stoploss / Point);
-            stoploss = MathMax(stoploss, Ask + spread);
-            if((stoploss < OrderOpenPrice()) && (stoploss < OrderStopLoss()) && profitable)
+            new_sl = OrderOpenPrice() - trailing_level * (OrderOpenPrice() - Ask);
+            new_sl = Point * MathRound(new_sl / Point);
+            if((new_sl < OrderOpenPrice()) && ((new_sl < OrderStopLoss()) || (OrderStopLoss() == 0)))
               {
-               if(OrderModify(ticket, OrderOpenPrice(), stoploss, 0.0, 0)) {}
+               if(OrderModify(ticket, OrderOpenPrice(), new_sl, 0.0, 0)) {}
               }
             break;
         }
@@ -264,18 +302,17 @@ void trail_orders(int type1, int type2)
 //+------------------------------------------------------------------+
 void update_vars()
   {
-   max_price = MathMax(Ask, max_price);
-   min_price = MathMin(Bid, min_price);
+   if(max_price < Ask)
+     {
+      adjust = Ask - max_price;
+      max_price = Ask;
+     }
+   if(Bid < min_price)
+     {
+      adjust = Bid - min_price;
+      min_price = Bid;
+     }
   }
 
 //+------------------------------------------------------------------+
-//| Time to wait before wait_minutes expire                          |
-//+------------------------------------------------------------------+
-datetime wait_time()
-  {
-   return 60 * wait_minutes - time_since_reset();
-  }
 
-//+------------------------------------------------------------------+
-
-//+------------------------------------------------------------------+
