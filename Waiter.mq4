@@ -10,11 +10,11 @@
 #property strict
 
 //--- input parameters
-input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
+input double   max_loose      = 0.10;  // maximum to loose from balance (0.1 = 10%)
 input double   trailing_level =  0.5;  // trailing level (0...1)
+input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
 
 //--- global variables
-double         adjust;                 // value to adjust stop/limit orders by
 double         lot;                    // current lot size
 double         max_price;              // maximum price since last trade
 double         min_price;              // minimum price since last trade
@@ -33,13 +33,11 @@ void adjust_order(int ticket)
         {
          case OP_BUYSTOP:
          case OP_SELLLIMIT:
-            if(adjust < 0)
-               if(OrderModify(ticket, OrderOpenPrice() + adjust, 0, 0, 0)) {}
+            if(OrderModify(ticket, Ask + spread_stoplevel(), 0, 0, 0)) {}
             break;
          case OP_SELLSTOP:
          case OP_BUYLIMIT:
-            if(0 < adjust)
-               if(OrderModify(ticket, OrderOpenPrice() + adjust, 0, 0, 0)) {}
+            if(OrderModify(ticket, Bid - spread_stoplevel(), 0, 0, 0)) {}
             break;
         }
      }
@@ -73,7 +71,18 @@ void delete_orders(int type1, int type2)
         {
          if((OrderType() == type1) || (OrderType() == type2))
            {
-            if(OrderDelete(OrderTicket())) {}
+            switch(OrderType())
+              {
+               case OP_BUY:
+                  if(OrderClose(OrderTicket(), OrderLots(), Bid, 0)) {}
+                  break;
+               case OP_SELL:
+                  if(OrderClose(OrderTicket(), OrderLots(), Ask, 0)) {}
+                  break;
+               default:
+                  if(OrderDelete(OrderTicket())) {}
+                  break;
+              }
            }
         }
      }
@@ -87,6 +96,14 @@ string formatted_time(datetime time)
   }
 
 //+------------------------------------------------------------------+
+//| Maximum lot for equity present                                   |
+//+------------------------------------------------------------------+
+double max_lot_by_equity()
+  {
+   return AccountEquity() / MarketInfo(_Symbol, MODE_MARGINREQUIRED);
+  }
+
+//+------------------------------------------------------------------+
 //| Expert initialization function.                                  |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -95,7 +112,7 @@ int OnInit()
    lot = MarketInfo(_Symbol, MODE_MINLOT);
    order_type1 = use_stop_order ? OP_BUYSTOP : OP_SELLLIMIT;
    order_type2 = use_stop_order ? OP_SELLSTOP : OP_BUYLIMIT;
-   reset_adjust_max_min_price_time();
+   reset_max_min_price_time();
 //---
    return(INIT_SUCCEEDED);
   }
@@ -121,18 +138,19 @@ void OnTick()
                break;
             case 1:
             case 2:
+               if(AccountEquity() < (1 - max_loose) * AccountBalance())
+                  delete_orders(OP_BUY, OP_SELL);
                trail_orders(OP_BUY, OP_SELL);
-               reset_adjust_max_min_price_time();
+               reset_max_min_price_time();
                break;
            }
          break;
       case 1:
          delete_orders(order_type1, order_type2);
-         reset_adjust_max_min_price_time();
+         reset_max_min_price_time();
          break;
       case 2:
-         if(adjust != 0)
-            adjust_orders(order_type1, order_type2);
+         adjust_orders(order_type1, order_type2);
          break;
      }
   }
@@ -140,9 +158,8 @@ void OnTick()
 //+------------------------------------------------------------------+
 //| Reset max_price, min_price, and reset_time                       |
 //+------------------------------------------------------------------+
-void reset_adjust_max_min_price_time()
+void reset_max_min_price_time()
   {
-   adjust = 0;
    max_price = Ask;
    min_price = Bid;
    reset_time = TimeCurrent();
@@ -161,8 +178,7 @@ string padded_number(int number)
 //+------------------------------------------------------------------+
 bool price_too_close()
   {
-   double mid_price = (max_price + min_price) / 2;
-   return Ask + Point < mid_price || mid_price < Bid - Point || (max_price - min_price) / Point < MarketInfo(_Symbol, MODE_SPREAD) + MarketInfo(_Symbol, MODE_STOPLEVEL);
+   return max_price - spread_stoplevel() < Ask || Bid < min_price + spread_stoplevel();
   }
 
 //+------------------------------------------------------------------+
@@ -174,14 +190,14 @@ void send_order(int type)
      {
       case OP_BUYSTOP:
       case OP_SELLLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, max_price, 0, 0, 0))
+         if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel(), 0, 0, 0))
            {
             max_price = Ask;
            }
          break;
       case OP_SELLSTOP:
       case OP_BUYLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, min_price, 0, 0, 0))
+         if(0 <= OrderSend(_Symbol, type, lot, Bid - spread_stoplevel(), 0, 0, 0))
            {
             min_price = Bid;
            }
@@ -203,7 +219,13 @@ void send_orders(int type1, int type2)
 //+------------------------------------------------------------------+
 void set_lot_size()
   {
-   lot = MarketInfo(Symbol(), MODE_MINLOT);
+   double lot_step = MarketInfo(_Symbol, MODE_LOTSTEP);
+   double max_lot = MarketInfo(_Symbol, MODE_MAXLOT);
+   double min_lot = MarketInfo(_Symbol, MODE_MINLOT);
+   lot = max_lot_by_equity() / 10;
+   lot = lot_step * MathRound(lot / lot_step);
+   lot = MathMax(min_lot, lot);
+   lot = MathMin(max_lot, lot);
   }
 
 //+------------------------------------------------------------------+
@@ -212,15 +234,30 @@ void set_lot_size()
 void show_comments()
   {
    string space = "\n                                             ";
-   string comment = space + "Max price = " + DoubleToString(max_price, Digits) + ", Ask = " + DoubleToString(Ask, Digits);
-   comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", Bid = " + DoubleToString(Bid, Digits);
-   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits) + ", for Ask/Bid = " + DoubleToString((Ask + Bid) / 2, Digits);
-   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point)) + ", for Ask/Bid = " + IntegerToString((int)((Ask - Bid) / Point));
-   comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD)) + ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
+   string comment = space + "Lot size = " + DoubleToString(lot, 2);
+   comment += ", max lot by equity = " + DoubleToString(max_lot_by_equity(), 2);
+   comment += space + "Max price = " + DoubleToString(max_price, Digits) + ", ask = " + DoubleToString(Ask, Digits);
+   comment += ", max price to ask = " + IntegerToString((int) MathRound((max_price - Ask) / Point));
+   comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", bid = " + DoubleToString(Bid, Digits);
+   comment += ", bid to min price = " + IntegerToString((int) MathRound((Bid - min_price) / Point));
+   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits);
+   comment += ", for ask/bid = " + DoubleToString((Ask + Bid) / 2, Digits);
+   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point));
+   comment += ", for ask/bid = " + IntegerToString((int)((Ask - Bid) / Point));
+   comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD));
+   comment += ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
    comment += space + "Time since reset = " + formatted_time(time_since_reset());
    if(price_too_close())
       comment += space + "Price too close";
    Comment(comment);
+  }
+
+//+------------------------------------------------------------------+
+//| Market info spread + stop level in points                        |
+//+------------------------------------------------------------------+
+double spread_stoplevel()
+  {
+   return Point * (MarketInfo(_Symbol, MODE_SPREAD) + MarketInfo(_Symbol, MODE_STOPLEVEL));
   }
 
 //+------------------------------------------------------------------+
@@ -304,15 +341,12 @@ void update_vars()
   {
    if(max_price < Ask)
      {
-      adjust = Ask - max_price;
       max_price = Ask;
      }
    if(Bid < min_price)
      {
-      adjust = Bid - min_price;
       min_price = Bid;
      }
   }
 
 //+------------------------------------------------------------------+
-
