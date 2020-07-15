@@ -10,10 +10,10 @@
 #property strict
 
 //--- input parameters
-input double   max_loose      = 0.22;  // maximum to loose from balance (0.1 = 10%)
-input double   reset_seconds  = 17280; // seconds to pass to reset stop or limit orders
+input double   max_loose      = 0.64;  // maximum to loose from balance (0.1 = 10%)
+input double   reset_seconds  = 86400; // seconds to pass to reset stop or limit orders
 input double   trailing_level =  0.5;  // trailing level (0...1)
-input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
+input bool     use_stop_order = false;  // use stop (true) or limit (false) orders
 
 //--- global variables
 double         lot;                    // current lot size
