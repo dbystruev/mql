@@ -10,7 +10,8 @@
 #property strict
 
 //--- input parameters
-input double   max_loose      = 0.10;  // maximum to loose from balance (0.1 = 10%)
+input double   max_loose      = 0.22;  // maximum to loose from balance (0.1 = 10%)
+input double   reset_seconds  = 17280; // seconds to pass to reset stop or limit orders
 input double   trailing_level =  0.5;  // trailing level (0...1)
 input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
 
@@ -27,17 +28,22 @@ datetime       reset_time;             // time when max_price and min_price were
 //+------------------------------------------------------------------+
 void adjust_order(int ticket)
   {
+   double new_price;
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
       switch(OrderType())
         {
          case OP_BUYSTOP:
          case OP_SELLLIMIT:
-            if(OrderModify(ticket, Ask + spread_stoplevel(), 0, 0, 0)) {}
+            new_price = Ask + spread_stoplevel();
+            if(OrderOpenPrice() < new_price)
+               if(OrderModify(ticket, new_price, 0, 0, 0)) {}
             break;
          case OP_SELLSTOP:
          case OP_BUYLIMIT:
-            if(OrderModify(ticket, Bid - spread_stoplevel(), 0, 0, 0)) {}
+            new_price = Bid - spread_stoplevel();
+            if(new_price < OrderOpenPrice())
+               if(OrderModify(ticket, new_price, 0, 0, 0)) {}
             break;
         }
      }
@@ -135,12 +141,14 @@ void OnTick()
                   return;
                set_lot_size();
                send_orders(order_type1, order_type2);
+               reset_max_min_price_time();
                break;
             case 1:
             case 2:
                if(AccountEquity() < (1 - max_loose) * AccountBalance())
                   delete_orders(OP_BUY, OP_SELL);
-               trail_orders(OP_BUY, OP_SELL);
+               else
+                  trail_orders(OP_BUY, OP_SELL);
                reset_max_min_price_time();
                break;
            }
@@ -150,7 +158,10 @@ void OnTick()
          reset_max_min_price_time();
          break;
       case 2:
-         adjust_orders(order_type1, order_type2);
+         if(time_since_reset() < reset_seconds)
+            adjust_orders(order_type1, order_type2);
+         else
+            delete_orders(order_type1, order_type2);
          break;
      }
   }
@@ -190,17 +201,11 @@ void send_order(int type)
      {
       case OP_BUYSTOP:
       case OP_SELLLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel(), 0, 0, 0))
-           {
-            max_price = Ask;
-           }
+         if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel(), 0, 0, 0)) {}
          break;
       case OP_SELLSTOP:
       case OP_BUYLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, Bid - spread_stoplevel(), 0, 0, 0))
-           {
-            min_price = Bid;
-           }
+         if(0 <= OrderSend(_Symbol, type, lot, Bid - spread_stoplevel(), 0, 0, 0)) {}
          break;
      }
   }
