@@ -10,43 +10,40 @@
 #property strict
 
 //--- input parameters
-input double   max_loose      = 0.64;  // maximum to loose from balance (0.1 = 10%)
-input double   reset_seconds  = 86400; // seconds to pass to reset stop or limit orders
-input double   trailing_level =  0.5;  // trailing level (0...1)
-input bool     use_stop_order = false;  // use stop (true) or limit (false) orders
+input double   adjust_time_factor = 1; // factor to adjust time for stop/limit orders
+input double   stop_level_factor = 2;  // factor for stop level above/below stop/limit orders
+input double   max_loose      = 0.25;  // maximum to loose from balance (0.1 = 10%)
+input double   trailing_level = 0.5;   // trailing level (0...1)
+input bool     use_stop_order = true;  // use stop (true) or limit (false) orders
 
 //--- global variables
-double         lot;                    // current lot size
+double         lot;                    // current l ot size
 double         max_price;              // maximum price since last trade
 double         min_price;              // minimum price since last trade
+datetime       order_last_move;        // last time the stop/limit orders above the ask and below the bid were moved
+datetime       order_next_move;        // next time the stop/limit orders above the ask and below the bid were moved
 int            order_type1;            // first order type
 int            order_type2;            // second order type
 datetime       reset_time;             // time when max_price and min_price were reset
 
 //+------------------------------------------------------------------+
-//| Adjust an order with given ticket.                               |
+//| Adjust an order with given ticket. Return true if successful.    |
 //+------------------------------------------------------------------+
-void adjust_order(int ticket)
+bool adjust_order(int ticket)
   {
-   double new_price;
    if(OrderSelect(ticket, SELECT_BY_TICKET))
      {
       switch(OrderType())
         {
          case OP_BUYSTOP:
          case OP_SELLLIMIT:
-            new_price = Ask + spread_stoplevel();
-            if(OrderOpenPrice() < new_price)
-               if(OrderModify(ticket, new_price, 0, 0, 0)) {}
-            break;
+            return OrderModify(ticket, Ask + spread_stoplevel_with_factor(), 0, 0, 0);
          case OP_SELLSTOP:
          case OP_BUYLIMIT:
-            new_price = Bid - spread_stoplevel();
-            if(new_price < OrderOpenPrice())
-               if(OrderModify(ticket, new_price, 0, 0, 0)) {}
-            break;
+            return OrderModify(ticket, Bid - spread_stoplevel_with_factor(), 0, 0, 0);
         }
      }
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -54,23 +51,50 @@ void adjust_order(int ticket)
 //+------------------------------------------------------------------+
 void adjust_orders(int type1, int type2)
   {
+   if(TimeCurrent() < order_next_move())
+      return;
+   if(spread_stoplevel() < MathMin(order_to_price(type1, Ask), order_to_price(type2, Bid)))
+      return;
+   int orders_adjusted = 0;
    for(int i = 0; i < OrdersTotal(); i++)
      {
       if(OrderSelect(i, SELECT_BY_POS))
         {
          if((OrderType() == type1) || (OrderType() == type2))
            {
-            adjust_order(OrderTicket());
+            if(adjust_order(OrderTicket()))
+               orders_adjusted++;
            }
         }
+     }
+   if(0 < orders_adjusted)
+     {
+      order_next_move = 2 * TimeCurrent()
+                        - order_last_move;
+      order_last_move = TimeCurrent();
      }
   }
 
 //+------------------------------------------------------------------+
-//| Delete the orders of given types. Changes last_trade if deleted. |
+//| Gap between two given orders.                                    |
 //+------------------------------------------------------------------+
-void delete_orders(int type1, int type2)
+double between_orders(int type1, int type2)
   {
+   if(order_select(order_type1))
+     {
+      double first_price = OrderOpenPrice();
+      if(order_select(order_type2))
+         return MathAbs(OrderOpenPrice() - first_price);
+     }
+   return -1;
+  }
+
+//+------------------------------------------------------------------+
+//| Delete/close the orders of given types. Returns true if deleted. |
+//+------------------------------------------------------------------+
+bool delete_orders(int type1, int type2)
+  {
+   int deleted_orders = 0;
    for(int i = 0; i < OrdersTotal(); i++)
      {
       if(OrderSelect(i, SELECT_BY_POS))
@@ -80,25 +104,31 @@ void delete_orders(int type1, int type2)
             switch(OrderType())
               {
                case OP_BUY:
-                  if(OrderClose(OrderTicket(), OrderLots(), Bid, 0)) {}
+                  if(OrderClose(OrderTicket(), OrderLots(), Bid, 0))
+                     deleted_orders++;
                   break;
                case OP_SELL:
-                  if(OrderClose(OrderTicket(), OrderLots(), Ask, 0)) {}
+                  if(OrderClose(OrderTicket(), OrderLots(), Ask, 0))
+                     deleted_orders++;
                   break;
                default:
-                  if(OrderDelete(OrderTicket())) {}
+                  if(OrderDelete(OrderTicket()))
+                     deleted_orders++;
                   break;
               }
            }
         }
      }
+   return 0 < deleted_orders;
   }
 //+------------------------------------------------------------------+
 //| Format time to 00:00:00.                                         |
 //+------------------------------------------------------------------+
 string formatted_time(datetime time)
   {
-   return padded_number(TimeHour(time)) + ":"+ padded_number(TimeMinute(time)) + ":"+ padded_number(TimeSeconds(time));
+   string sign = time < 0 ? "-" : "";
+   time = time < 0 ? -time : time;
+   return sign + padded_number(TimeHour(time)) + ":"+ padded_number(TimeMinute(time)) + ":"+ padded_number(TimeSeconds(time));
   }
 
 //+------------------------------------------------------------------+
@@ -154,16 +184,54 @@ void OnTick()
            }
          break;
       case 1:
-         delete_orders(order_type1, order_type2);
-         reset_max_min_price_time();
+         if(0 < total_orders(OP_BUY, OP_SELL))
+           {
+            if(delete_orders(order_type1, order_type2)) {}
+           }
+         else
+           {
+            int order_type = 0 < total_orders(order_type1) ? order_type2 : order_type1;
+            send_order(order_type);
+           }
          break;
       case 2:
-         if(time_since_reset() < reset_seconds)
-            adjust_orders(order_type1, order_type2);
-         else
-            delete_orders(order_type1, order_type2);
+         adjust_orders(order_type1, order_type2);
          break;
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Minimum of bottom_order_next_move and top_order_next_move.       |
+//+------------------------------------------------------------------+
+datetime order_next_move()
+  {
+   return TimeCurrent() + (datetime) adjust_time_factor * (order_next_move - TimeCurrent());
+  }
+
+//+------------------------------------------------------------------+
+//| Selects first order of given type. Returns false if not found.   |
+//+------------------------------------------------------------------+
+bool order_select(int type1, int type2 = -1)
+  {
+   for(int i = 0; i < OrdersTotal(); i++)
+     {
+      if(OrderSelect(i, SELECT_BY_POS))
+        {
+         if(OrderType() == type1 || OrderType() == type2)
+            return true;
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Gap between given order and the price.                           |
+//+------------------------------------------------------------------+
+double order_to_price(int type, double price)
+  {
+   if(order_select(type))
+      return MathAbs(OrderOpenPrice() - price);
+   return -1;
   }
 
 //+------------------------------------------------------------------+
@@ -173,7 +241,8 @@ void reset_max_min_price_time()
   {
    max_price = Ask;
    min_price = Bid;
-   reset_time = TimeCurrent();
+   order_last_move = TimeCurrent();
+   order_next_move = order_last_move + 1;
   }
 
 //+------------------------------------------------------------------+
@@ -185,7 +254,15 @@ string padded_number(int number)
   }
 
 //+------------------------------------------------------------------+
-//| Returns true if current price is too close to max or min price   |
+//| Value corresponding to one point price move for one lot.         |
+//+------------------------------------------------------------------+
+double point_value()
+  {
+   return Point * MarketInfo(_Symbol, MODE_TICKVALUE) / MarketInfo(_Symbol, MODE_TICKSIZE);
+  }
+
+//+------------------------------------------------------------------+
+//| Returns true if current price is too close to max or min price.  |
 //+------------------------------------------------------------------+
 bool price_too_close()
   {
@@ -201,11 +278,11 @@ void send_order(int type)
      {
       case OP_BUYSTOP:
       case OP_SELLLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel(), 0, 0, 0)) {}
+         if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel_with_factor(), 0, 0, 0)) {}
          break;
       case OP_SELLSTOP:
       case OP_BUYLIMIT:
-         if(0 <= OrderSend(_Symbol, type, lot, Bid - spread_stoplevel(), 0, 0, 0)) {}
+         if(0 <= OrderSend(_Symbol, type, lot, Bid - spread_stoplevel_with_factor(), 0, 0, 0)) {}
          break;
      }
   }
@@ -239,26 +316,59 @@ void set_lot_size()
 void show_comments()
   {
    string space = "\n                                             ";
-   string comment = space + "Lot size = " + DoubleToString(lot, 2);
-   comment += ", max lot by equity = " + DoubleToString(max_lot_by_equity(), 2);
-   comment += space + "Max price = " + DoubleToString(max_price, Digits) + ", ask = " + DoubleToString(Ask, Digits);
-   comment += ", max price to ask = " + IntegerToString((int) MathRound((max_price - Ask) / Point));
-   comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", bid = " + DoubleToString(Bid, Digits);
-   comment += ", bid to min price = " + IntegerToString((int) MathRound((Bid - min_price) / Point));
-   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits);
-   comment += ", for ask/bid = " + DoubleToString((Ask + Bid) / 2, Digits);
-   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point));
-   comment += ", for ask/bid = " + IntegerToString((int)((Ask - Bid) / Point));
+   string comment = "";
+   double first_price = 0;
+   if(order_select(order_type1))
+     {
+      comment += space + "Ask to top order: " + IntegerToString((int)(order_to_price(order_type1, Ask) / Point));
+      comment += " (need < " + IntegerToString((int)(spread_stoplevel() / Point)) + " to move)";
+     }
+   if(order_select(order_type2))
+     {
+      comment += space + "Bid to bottom order: " + IntegerToString((int)(order_to_price(order_type2, Bid) / Point));
+      comment += " (need < " + IntegerToString((int)(spread_stoplevel() / Point)) + " to move)";
+     }
+   comment += space + "Lot = " + DoubleToString(lot, 2);
+   comment += " of max lot by equity = " + DoubleToString(max_lot_by_equity(), 2) + " / 10";
    comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD));
    comment += ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
-   comment += space + "Time since reset = " + formatted_time(time_since_reset());
-   if(price_too_close())
-      comment += space + "Price too close";
+   comment += space + "Max price = " + DoubleToString(max_price, Digits) + ", ask = " + DoubleToString(Ask, Digits);
+   comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", bid = " + DoubleToString(Bid, Digits);
+   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits);
+   comment += ", for ask/bid = " + DoubleToString((Ask + Bid) / 2, Digits);
+   int between_orders = (int)(MathRound(between_orders(order_type1, order_type2) / Point));
+   if(0 < between_orders)
+     {
+      comment += space + "There are " + IntegerToString(between_orders) + " points between orders";
+     }
+   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point));
+   comment += ", for ask/bid = " + IntegerToString((int)((Ask - Bid) / Point));
+   comment += space + "Orders moved " + formatted_time(TimeCurrent() - order_last_move) + " ago";
+   if(TimeCurrent() < order_next_move())
+     {
+      comment += space + "Orders' next move in ";
+      comment += formatted_time(order_next_move() - TimeCurrent());
+     }
+   if(total_orders() == 0 && price_too_close())
+     {
+      comment += space + "Price is too close (";
+      comment += IntegerToString((int) MathRound((max_price - Ask) / Point)) + " to ask, ";
+      comment += IntegerToString((int) MathRound((Bid - min_price) / Point)) + " to bid) to send new orders";
+     }
+   if(order_select(OP_BUY, OP_SELL) && 0 < OrderStopLoss())
+     {
+      double profit = OrderLots() * point_value() * stop_points();
+      comment += space + "Value = " + IntegerToString(stop_points()) + " sl";
+      comment += " x " + DoubleToString(point_value(), 2);
+      comment += " x " + DoubleToString(OrderLots(), 2) + " lot";
+      comment += " = " + DoubleToString(profit, 2);
+      comment += " (" + DoubleToString(AccountBalance() + profit, 2) + " total)";
+     }
    Comment(comment);
   }
 
 //+------------------------------------------------------------------+
-//| Market info spread + stop level in points                        |
+//| Market info spread + stop level in points.                       |
 //+------------------------------------------------------------------+
 double spread_stoplevel()
   {
@@ -266,24 +376,32 @@ double spread_stoplevel()
   }
 
 //+------------------------------------------------------------------+
-//| Time passed since last reset                                     |
+//| Spread stop level in points taking into account stop level factor|
 //+------------------------------------------------------------------+
-datetime time_since_reset()
+double spread_stoplevel_with_factor()
   {
-   return TimeCurrent() - reset_time;
+   return Point * MathRound(stop_level_factor * spread_stoplevel() / Point);
+  }
+
+//+------------------------------------------------------------------+
+//| Stop points for currently selected order.                        |
+//+------------------------------------------------------------------+
+int stop_points()
+  {
+   return (int)(MathAbs(OrderOpenPrice() - OrderStopLoss()) / Point);
   }
 
 //+------------------------------------------------------------------+
 //| Number of orders of given types.                                 |
 //+------------------------------------------------------------------+
-int total_orders(int type1, int type2)
+int total_orders(int type1 = -1, int type2 = -1)
   {
    int total_orders = 0;
    for(int i = 0; i < OrdersTotal(); i++)
      {
       if(OrderSelect(i, SELECT_BY_POS))
         {
-         if((OrderType() == type1) || (OrderType() == type2))
+         if(OrderType() == type1 || OrderType() == type2 || type1 < 0)
            {
             total_orders++;
            }
@@ -305,7 +423,7 @@ void trail_order(int ticket)
          case OP_BUY:
             new_sl = OrderOpenPrice() + trailing_level * (Bid - OrderOpenPrice());
             new_sl = Point * MathRound(new_sl / Point);
-            if((OrderOpenPrice() < new_sl) && (OrderStopLoss() < new_sl))
+            if(OrderOpenPrice() < new_sl && OrderStopLoss() < new_sl)
               {
                if(OrderModify(ticket, OrderOpenPrice(), new_sl, 0.0, 0)) {}
               }
@@ -313,7 +431,7 @@ void trail_order(int ticket)
          case OP_SELL:
             new_sl = OrderOpenPrice() - trailing_level * (OrderOpenPrice() - Ask);
             new_sl = Point * MathRound(new_sl / Point);
-            if((new_sl < OrderOpenPrice()) && ((new_sl < OrderStopLoss()) || (OrderStopLoss() == 0)))
+            if(new_sl < OrderOpenPrice() && (new_sl < OrderStopLoss() || OrderStopLoss() == 0))
               {
                if(OrderModify(ticket, OrderOpenPrice(), new_sl, 0.0, 0)) {}
               }
