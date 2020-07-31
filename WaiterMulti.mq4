@@ -11,15 +11,16 @@
 
 //--- input parameters
 input double   adjust_time_factor = 0.001;// adjust time factor: how much longer to keep orders not movable
+input double   loss_step = 0.1;           // loss step to start putting market orders (0.1 = 10%)
 input double   lot_equity_factor = 0.01;  // lot equity factor for lot setting (0.01 = 1% of max equity)
-input double   max_loose = 1;             // maximum to loose from balance (1 = 100%)
-input double   proximity_factor  = 15;    // proximity factor: how close to orders start moving them
-input double   stop_level_factor = 5;     // stop level factor: how far to put orders initially from current price
+input double   proximity_factor  = 0;     // proximity factor: how close to orders start moving them
+input double   stop_level_factor = 1;     // stop level factor: how far to put orders initially from current price
 input double   trailing_level = 0.5;      // trailing level (0...1)
 input bool     use_stop_order = true;     // use stop (true) or limit (false) orders
 
 //--- global variables
 double         lot;                       // current l ot size
+int            max_orders;                // maximum number of BUY and SELL orders
 double         max_price;                 // maximum price since last trade
 double         min_price;                 // minimum price since last trade
 datetime       order_last_move;           // last time the stop/limit orders above the ask and below the bid were moved
@@ -147,6 +148,7 @@ int OnInit()
   {
 //---
    lot = MarketInfo(_Symbol, MODE_MINLOT);
+   max_orders = (int) MathRound(1 / loss_step);
    order_type1 = use_stop_order ? OP_BUYSTOP : OP_SELLLIMIT;
    order_type2 = use_stop_order ? OP_SELLSTOP : OP_BUYLIMIT;
    reset_max_min_price_time();
@@ -162,10 +164,11 @@ void OnTick()
    update_vars();
    show_comments();
 
+   int buy_sell_orders = total_orders(OP_BUY, OP_SELL);
    switch(total_orders(order_type1, order_type2))
      {
       case 0:
-         switch(total_orders(OP_BUY, OP_SELL))
+         switch(buy_sell_orders)
            {
             case 0:
                if(price_too_close())
@@ -174,18 +177,29 @@ void OnTick()
                send_orders(order_type1, order_type2);
                reset_max_min_price_time();
                break;
-            case 1:
-            case 2:
-               if(AccountEquity() < (1 - max_loose) * AccountBalance())
-                  delete_orders(OP_BUY, OP_SELL);
+            default:
+               // 1  =  1
+               // 2  +  1  =  3
+               // 3  +  2  +  1  = 6
+               // 4  +  3  +  2  +  1 = 10
+               // 5  +  4  +  3  +  2  +  1  = 15
+               if(buy_sell_orders < max_orders && AccountEquity() < (1 - loss_step * buy_sell_orders * (buy_sell_orders + 1) / 2) * AccountBalance())
+                 {
+                  if(order_select(OP_BUY, OP_SELL))
+                    {
+                     lot = OrderLots();
+                     send_order(OrderType());
+                    }
+                 }
                else
+                 {
                   trail_orders(OP_BUY, OP_SELL);
-               reset_max_min_price_time();
-               break;
+                  reset_max_min_price_time();
+                 }
            }
          break;
       case 1:
-         if(0 < total_orders(OP_BUY, OP_SELL))
+         if(0 < buy_sell_orders)
            {
             if(delete_orders(order_type1, order_type2)) {}
            }
@@ -212,14 +226,22 @@ datetime order_next_move()
 //+------------------------------------------------------------------+
 //| Selects first order of given type. Returns false if not found.   |
 //+------------------------------------------------------------------+
-bool order_select(int type1, int type2 = -1)
+bool order_select(int type1, int type2 = -1, bool find_profitable = false)
   {
    for(int i = 0; i < OrdersTotal(); i++)
      {
       if(OrderSelect(i, SELECT_BY_POS))
         {
          if(OrderType() == type1 || OrderType() == type2)
-            return true;
+           {
+            if(find_profitable)
+              {
+               if(0 < OrderProfit())
+                  return true;
+              }
+            else
+               return true;
+           }
         }
      }
    return false;
@@ -277,6 +299,12 @@ void send_order(int type)
   {
    switch(type)
      {
+      case OP_BUY:
+         if(0 <= OrderSend(_Symbol, type, lot, Ask, 0, 0, 0)) {}
+         break;
+      case OP_SELL:
+         if(0 <= OrderSend(_Symbol, type, lot, Bid, 0, 0, 0)) {}
+         break;
       case OP_BUYSTOP:
       case OP_SELLLIMIT:
          if(0 <= OrderSend(_Symbol, type, lot, Ask + spread_stoplevel_with_factor(), 0, 0, 0)) {}
@@ -329,27 +357,42 @@ void show_comments()
       comment += space + "Bid to bottom order: " + IntegerToString((int)(order_to_price(order_type2, Bid) / Point));
       comment += " (need < " + IntegerToString((int)(proximity_factor * spread_stoplevel() / Point)) + " to move)";
      }
+   if(AccountEquity() < AccountBalance())
+     {
+      comment += space + "Current loss = " + DoubleToString(100 * (1 - AccountEquity() / AccountBalance()), 1) + "%";
+      comment += ", loss steps =";
+      for(int step = 1; step <= max_orders && loss_step * step * (step + 1) / 2 < 1; step++)
+        {
+         comment += " " + DoubleToString(100 * loss_step * step * (step + 1) / 2, 0) + "%";
+        }
+     }
+   else
+      if(AccountBalance() < AccountEquity())
+         comment += space + "Current gain = " + DoubleToString(100 * (AccountEquity() / AccountBalance() - 1), 1) + "%";
    comment += space + "Lot = " + DoubleToString(lot, 2);
-   comment += " of max lot by equity = " + DoubleToString(100 * lot_equity_factor, 0) + "%";
+   comment += ", max lot by equity = " + DoubleToString(100 * lot_equity_factor, 0) + "%";
    comment += " * " + DoubleToString(max_lot_by_equity(), 2);
    comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD));
    comment += ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
-   comment += space + "Max price = " + DoubleToString(max_price, Digits) + ", ask = " + DoubleToString(Ask, Digits);
-   comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", bid = " + DoubleToString(Bid, Digits);
-   comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits);
-   comment += ", for ask/bid = " + DoubleToString((Ask + Bid) / 2, Digits);
-   int between_orders = (int)(MathRound(between_orders(order_type1, order_type2) / Point));
-   if(0 < between_orders)
+   if(0 < total_orders(order_type1, order_type2))
      {
-      comment += space + "There are " + IntegerToString(between_orders) + " points between orders";
-     }
-   comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point));
-   comment += ", for ask/bid = " + IntegerToString((int)((Ask - Bid) / Point));
-   comment += space + "Orders moved " + formatted_time(TimeCurrent() - order_last_move) + " ago";
-   if(TimeCurrent() < order_next_move())
-     {
-      comment += space + "Orders' next move in ";
-      comment += formatted_time(order_next_move() - TimeCurrent());
+      comment += space + "Max price = " + DoubleToString(max_price, Digits) + ", ask = " + DoubleToString(Ask, Digits);
+      comment += space + "Min price = " + DoubleToString(min_price, Digits) + ", bid = " + DoubleToString(Bid, Digits);
+      comment += space + "Mid points for max/min = " + DoubleToString((max_price + min_price) / 2, Digits);
+      comment += ", for ask/bid = " + DoubleToString((Ask + Bid) / 2, Digits);
+      int between_orders = (int)(MathRound(between_orders(order_type1, order_type2) / Point));
+      if(0 < between_orders)
+        {
+         comment += space + "There are " + IntegerToString(between_orders) + " points between orders";
+        }
+      comment += space + "Spreads for max/min = " + IntegerToString((int)((max_price - min_price) / Point));
+      comment += ", for ask/bid = " + IntegerToString((int)((Ask - Bid) / Point));
+      comment += space + "Orders moved " + formatted_time(TimeCurrent() - order_last_move) + " ago";
+      if(TimeCurrent() < order_next_move())
+        {
+         comment += space + "Orders' next move in ";
+         comment += formatted_time(order_next_move() - TimeCurrent());
+        }
      }
    if(total_orders() == 0 && price_too_close())
      {
@@ -357,7 +400,7 @@ void show_comments()
       comment += IntegerToString((int) MathRound((max_price - Ask) / Point)) + " to ask, ";
       comment += IntegerToString((int) MathRound((Bid - min_price) / Point)) + " to bid) to send new orders";
      }
-   if(order_select(OP_BUY, OP_SELL) && 0 < OrderStopLoss())
+   if(order_select(OP_BUY, OP_SELL, true) && 0 < OrderStopLoss())
      {
       double profit = OrderLots() * point_value() * stop_points();
       comment += space + "Value = " + IntegerToString(stop_points()) + " sl";
