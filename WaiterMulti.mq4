@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                       Waiter.mq4 |
+//|                                                  WaiterMulti.mq4 |
 //|                                   Copyright 2020, Denis Bystruev |
 //|                                     https://github.com/dbystruev |
 //+------------------------------------------------------------------+
@@ -11,10 +11,10 @@
 
 //--- input parameters
 input double   adjust_time_factor = 0.001;// adjust time factor: how much longer to keep orders not movable
-input double   loss_step = 0.1;           // loss step to start putting market orders (0.1 = 10%)
-input double   lot_equity_factor = 0.01;  // lot equity factor for lot setting (0.01 = 1% of max equity)
-input double   proximity_factor  = 0;     // proximity factor: how close to orders start moving them
-input double   stop_level_factor = 1;     // stop level factor: how far to put orders initially from current price
+input double   loss_step = 0.001;         // loss step to start putting market orders (0.1 = 10%)
+input double   lot_equity_factor = 0.001; // lot equity factor for lot setting (0.01 = 1% of max equity)
+input double   proximity_factor  = 7;     // proximity factor: how close to orders start moving them
+input double   stop_level_factor = 2;     // stop level factor: how far to put orders initially from current price
 input double   trailing_level = 0.5;      // trailing level (0...1)
 input bool     use_stop_order = true;     // use stop (true) or limit (false) orders
 
@@ -123,6 +123,17 @@ bool delete_orders(int type1, int type2)
      }
    return 0 < deleted_orders;
   }
+
+//+------------------------------------------------------------------+
+//| Distance from initial order to order with step number            |
+//+------------------------------------------------------------------+
+double distance_for_step(int step)
+  {
+   if(step < 1)
+      return 0;
+   return distance_for_step(step - 1) + step * MathPow(2, step - 1);
+  }
+
 //+------------------------------------------------------------------+
 //| Format time to 00:00:00.                                         |
 //+------------------------------------------------------------------+
@@ -131,6 +142,14 @@ string formatted_time(datetime time)
    string sign = time < 0 ? "-" : "";
    time = time < 0 ? -time : time;
    return sign + padded_number(TimeHour(time)) + ":"+ padded_number(TimeMinute(time)) + ":"+ padded_number(TimeSeconds(time));
+  }
+
+//+------------------------------------------------------------------+
+//| Calculate a loss for given step                                  |
+//+------------------------------------------------------------------+
+double loss_for_step(int step)
+  {
+   return loss_step * distance_for_step(step);
   }
 
 //+------------------------------------------------------------------+
@@ -178,12 +197,8 @@ void OnTick()
                reset_max_min_price_time();
                break;
             default:
-               // 1  =  1
-               // 2  +  1  =  3
-               // 3  +  2  +  1  = 6
-               // 4  +  3  +  2  +  1 = 10
-               // 5  +  4  +  3  +  2  +  1  = 15
-               if(buy_sell_orders < max_orders && AccountEquity() < (1 - loss_step * buy_sell_orders * (buy_sell_orders + 1) / 2) * AccountBalance())
+               if(buy_sell_orders < max_orders &&
+                  AccountEquity() < (1 - loss_for_step(buy_sell_orders)) * AccountBalance())
                  {
                   if(order_select(OP_BUY, OP_SELL))
                     {
@@ -361,16 +376,16 @@ void show_comments()
      {
       comment += space + "Current loss = " + DoubleToString(100 * (1 - AccountEquity() / AccountBalance()), 1) + "%";
       comment += ", loss steps =";
-      for(int step = 1; step <= max_orders && loss_step * step * (step + 1) / 2 < 1; step++)
+      for(int step = 1; step <= max_orders && loss_for_step(step) < 1; step++)
         {
-         comment += " " + DoubleToString(100 * loss_step * step * (step + 1) / 2, 0) + "%";
+         comment += " " + DoubleToString(100 * loss_for_step(step), 1) + "%";
         }
      }
    else
       if(AccountBalance() < AccountEquity())
          comment += space + "Current gain = " + DoubleToString(100 * (AccountEquity() / AccountBalance() - 1), 1) + "%";
    comment += space + "Lot = " + DoubleToString(lot, 2);
-   comment += ", max lot by equity = " + DoubleToString(100 * lot_equity_factor, 0) + "%";
+   comment += ", max lot by equity = " + DoubleToString(100 * lot_equity_factor, 1) + "%";
    comment += " * " + DoubleToString(max_lot_by_equity(), 2);
    comment += space + "Market info spread = " + IntegerToString((int) MarketInfo(_Symbol, MODE_SPREAD));
    comment += ", stop level = " + IntegerToString((int) MarketInfo(_Symbol, MODE_STOPLEVEL));
