@@ -6,21 +6,11 @@
 
 #property copyright "Copyright 2020.07.10, Denis Bystruev"
 #property link      "https://github.com/dbystruev"
-#property version   "20.904"
+#property version   "1.00"
 #property strict
 
-//--- input parameters for Alpari
-//input double   adjust_time_factor = 0.001;// adjust time factor: how much longer to keep orders not movable
-//input double   proximity_factor  = 7;     // proximity factor: how close to orders start moving them
-//input double   stop_level_factor = 2;     // stop level factor: how far to put orders initially from current price
-
-//--- input parameters for InstaForex
-//input double   adjust_time_factor = 0.001;// adjust time factor: how much longer to keep orders not movable
-//input double   proximity_factor  = 3.5;   // proximity factor: how close to orders start moving them
-//input double   stop_level_factor = 1.5;   // stop level factor: how far to put orders initially from current price
-
-//--- input parameters for WorldForex
-input double   adjust_time_factor = 100;  // adjust time factor: how much longer to keep orders not movable
+//--- input parameters
+input double   adjust_time_factor = 10;   // adjust time factor: how much longer to keep orders not movable
 input double   loss_step = 0.001;         // loss step to start putting market orders (0.1 = 10%)
 input double   lot_equity_factor = 0.001; // lot equity factor for lot setting (0.01 = 1% of max equity)
 input double   proximity_factor  = 2.33;  // proximity factor: how close to orders start moving them
