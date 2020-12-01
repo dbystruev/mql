@@ -4,13 +4,13 @@
 //|                                     https://github.com/dbystruev |
 //+------------------------------------------------------------------+
 
-#property copyright "Copyright 2020.07.10, Denis Bystruev"
+#property copyright "Copyright 2020.07.10-12.01, Denis Bystruev"
 #property link      "https://github.com/dbystruev"
-#property version   "1.00"
+#property version   "20.336"
 #property strict
 
 //--- input parameters
-input double   adjust_time_factor = 10;   // adjust time factor: how much longer to keep orders not movable
+input double   adjust_time_factor = 2;    // adjust time factor: how much longer to keep orders not movable
 input double   loss_step = 0.001;         // loss step to start putting market orders (0.1 = 10%)
 input double   lot_equity_factor = 0.001; // lot equity factor for lot setting (0.01 = 1% of max equity)
 input double   proximity_factor  = 2.33;  // proximity factor: how close to orders start moving them
@@ -28,6 +28,8 @@ datetime       order_next_move;           // next time the stop/limit orders abo
 int            order_type1;               // first order type
 int            order_type2;               // second order type
 datetime       reset_time;                // time when max_price and min_price were reset
+double         trail_price_buy;           // price above which the trailing starts
+double         trail_price_sell;          // price below which the trailing starts
 
 //+------------------------------------------------------------------+
 //| Adjust an order with given ticket. Return true if successful.    |
@@ -415,6 +417,12 @@ void show_comments()
       comment += IntegerToString((int) MathRound((max_price - Ask) / Point)) + " to ask, ";
       comment += IntegerToString((int) MathRound((Bid - min_price) / Point)) + " to bid) to send new orders";
      }
+   if (0 < total_orders(OP_BUY)) {
+      comment += space + "Min price to start buy trailing = " + DoubleToString(trail_price_buy, Digits);
+   }
+   if (0 < total_orders(OP_SELL)) {
+      comment += space + "Max price to start sell trailing = " + DoubleToString(trail_price_sell, Digits);
+   }
    if(order_select(OP_BUY, OP_SELL, true) && 0 < OrderStopLoss())
      {
       double profit = OrderLots() * point_value() * stop_points();
@@ -503,19 +511,72 @@ void trail_order(int ticket)
 //+------------------------------------------------------------------+
 //| Trail orders of given types.                                     |
 //+------------------------------------------------------------------+
-void trail_orders(int type1, int type2)
-  {
-   for(int i = 0; i < OrdersTotal(); i++)
-     {
-      if(OrderSelect(i, SELECT_BY_POS))
-        {
-         if((OrderType() == type1) || (OrderType() == type2))
-           {
-            trail_order(OrderTicket());
-           }
-        }
-     }
-  }
+void trail_orders(int type1, int type2) {
+   double price_max = 0;
+   double price_min = DBL_MAX;
+   double second_price_max = price_max;
+   double second_price_min = price_min;
+   
+   for (int i = 0; i < OrdersTotal(); i++) {
+      if (OrderSelect(i, SELECT_BY_POS)) {
+         double price = OrderOpenPrice();
+         
+         if (second_price_max < price) {
+            if (price_max < price) {
+               second_price_max = price_max;
+               price_max = price;
+            } else {
+               second_price_max = price;
+            }
+         }
+         
+         if (price < second_price_min) {
+            if (price < price_min) {
+               second_price_min = price_min;
+               price_min = price;
+            } else {
+               second_price_min = price;
+            }
+         }
+      }
+   }
+   
+   if (second_price_max == 0) {
+      second_price_max = price_max;
+   }
+   if (second_price_min == DBL_MAX) {
+      second_price_min = price_min;
+   }
+   
+   trail_price_buy = second_price_min - trailing_level * (second_price_min - price_min);
+   trail_price_sell = second_price_max + trailing_level * (price_max - second_price_max);
+   bool trail_buy = trail_price_buy < Bid;
+   bool trail_sell = Ask < trail_price_sell;
+   
+   for (int i = 0; i < OrdersTotal(); i++) {
+      if (OrderSelect(i, SELECT_BY_POS)) {
+         int type = OrderType();
+         if ((type == type1) || (type == type2)) {
+            double price = OrderOpenPrice();
+            int ticket = OrderTicket();
+            switch (type) {
+               case OP_BUY:
+                  if (trail_buy) {
+                     trail_order(ticket);
+                  }
+                  break;
+               case OP_SELL:
+                  if (trail_sell) {
+                     trail_order(ticket);
+                  }
+                  break;
+               default:
+                  trail_order(ticket);
+            }
+         }
+      }
+   }
+}
 
 //+------------------------------------------------------------------+
 //| Update variables with every tick.                                |
