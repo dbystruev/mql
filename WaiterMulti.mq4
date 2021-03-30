@@ -6,17 +6,17 @@
 
 #property copyright "Copyright 2020.07.10-12.01, Denis Bystruev"
 #property link      "https://github.com/dbystruev"
-#property version   "20.336"
+#property version   "21.89"               // year.day (21.89 is 2021, March 30)
 #property strict
 
 //--- input parameters
-input double   adjust_time_factor = 2;    // adjust time factor: how much longer to keep orders not movable
+input double   adjust_time_factor = 1;    // adjust time factor: how much longer to keep orders not movable
 input double   loss_step = 0.001;         // loss step to start putting market orders (0.1 = 10%)
 input double   lot_equity_factor = 0.001; // lot equity factor for lot setting (0.01 = 1% of max equity)
 input double   proximity_factor  = 2.33;  // proximity factor: how close to orders start moving them
 input double   stop_level_factor = 1;     // stop level factor: how far to put orders initially from current price
 input double   trailing_level = 0.5;      // trailing level (0...1)
-input bool     use_stop_order = true;     // use stop (true) or limit (false) orders
+input bool     use_buy_orders = false;    // use buy (true) or sell (false) orders
 
 //--- global variables
 double         lot;                       // current l ot size
@@ -170,8 +170,8 @@ int OnInit()
 //---
    lot = MarketInfo(_Symbol, MODE_MINLOT);
    max_orders = (int) MathRound(1 / loss_step);
-   order_type1 = use_stop_order ? OP_BUYSTOP : OP_SELLLIMIT;
-   order_type2 = use_stop_order ? OP_SELLSTOP : OP_BUYLIMIT;
+   order_type1 = use_buy_orders ? OP_BUYSTOP : OP_SELLLIMIT;
+   order_type2 = use_buy_orders ? OP_BUYLIMIT : OP_SELLSTOP;
    reset_max_min_price_time();
 //---
    return(INIT_SUCCEEDED);
