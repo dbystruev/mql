@@ -15,7 +15,7 @@ input double   loss_step = 0.001;         // loss step to start putting market o
 input double   lot_equity_factor = 0.001; // lot equity factor for lot setting (0.01 = 1% of max equity)
 input double   proximity_factor  = 2.33;  // proximity factor: how close to orders start moving them
 input double   stop_level_factor = 1;     // stop level factor: how far to put orders initially from current price
-input double   trailing_level = 0.5;      // trailing level (0...1)
+input double   trailing_level = 0.75;     // trailing level (0...1)
 input bool     use_buy_orders = false;    // use buy (true) or sell (false) orders
 
 //--- global variables
