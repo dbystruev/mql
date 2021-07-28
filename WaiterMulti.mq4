@@ -19,7 +19,8 @@ input double   trailing_level = 0.75;     // trailing level (0...1)
 input bool     use_buy_orders = false;    // use buy (true) or sell (false) orders
 
 //--- global variables
-double         lot;                       // current l ot size
+double         lot;                       // current lot size
+double         max_balance;               // balance reached when there were no orders
 int            max_orders;                // maximum number of BUY and SELL orders
 double         max_price;                 // maximum price since last trade
 double         min_price;                 // minimum price since last trade
@@ -169,6 +170,7 @@ int OnInit()
   {
 //---
    lot = MarketInfo(_Symbol, MODE_MINLOT);
+   max_balance = AccountBalance();
    max_orders = (int) MathRound(1 / loss_step);
    order_type1 = use_buy_orders ? OP_BUYSTOP : OP_SELLLIMIT;
    order_type2 = use_buy_orders ? OP_BUYLIMIT : OP_SELLSTOP;
@@ -192,6 +194,7 @@ void OnTick()
          switch(buy_sell_orders)
            {
             case 0:
+               max_balance = AccountBalance();
                if(price_too_close())
                   return;
                set_lot_size();
@@ -199,6 +202,11 @@ void OnTick()
                reset_max_min_price_time();
                break;
             default:
+               if(max_balance < AccountEquity() && AccountEquity() < AccountBalance())
+                 {
+                  delete_orders(OP_BUY, OP_SELL);
+                  break;
+                 }
                if(buy_sell_orders < max_orders &&
                   AccountEquity() < (1 - loss_for_step(buy_sell_orders)) * AccountBalance())
                  {
@@ -275,17 +283,6 @@ double order_to_price(int type, double price)
   }
 
 //+------------------------------------------------------------------+
-//| Reset max_price, min_price, and reset_time                       |
-//+------------------------------------------------------------------+
-void reset_max_min_price_time()
-  {
-   max_price = Ask;
-   min_price = Bid;
-   order_last_move = TimeCurrent();
-   order_next_move = order_last_move + 1;
-  }
-
-//+------------------------------------------------------------------+
 //| Returns number as a string with padded 0 if number < 10.         |
 //+------------------------------------------------------------------+
 string padded_number(int number)
@@ -307,6 +304,18 @@ double point_value()
 bool price_too_close()
   {
    return max_price - spread_stoplevel() < Ask || Bid < min_price + spread_stoplevel();
+  }
+
+
+//+------------------------------------------------------------------+
+//| Reset max_price, min_price, and reset_time                       |
+//+------------------------------------------------------------------+
+void reset_max_min_price_time()
+  {
+   max_price = Ask;
+   min_price = Bid;
+   order_last_move = TimeCurrent();
+   order_next_move = order_last_move + 1;
   }
 
 //+------------------------------------------------------------------+
@@ -417,12 +426,15 @@ void show_comments()
       comment += IntegerToString((int) MathRound((max_price - Ask) / Point)) + " to ask, ";
       comment += IntegerToString((int) MathRound((Bid - min_price) / Point)) + " to bid) to send new orders";
      }
-   if (0 < total_orders(OP_BUY)) {
+   comment += space + "Max balance = " + DoubleToString(max_balance, 2);
+   if(0 < total_orders(OP_BUY))
+     {
       comment += space + "Min price to start buy trailing = " + DoubleToString(trail_price_buy, Digits);
-   }
-   if (0 < total_orders(OP_SELL)) {
+     }
+   if(0 < total_orders(OP_SELL))
+     {
       comment += space + "Max price to start sell trailing = " + DoubleToString(trail_price_sell, Digits);
-   }
+     }
    if(order_select(OP_BUY, OP_SELL, true) && 0 < OrderStopLoss())
      {
       double profit = OrderLots() * point_value() * stop_points();
@@ -511,72 +523,91 @@ void trail_order(int ticket)
 //+------------------------------------------------------------------+
 //| Trail orders of given types.                                     |
 //+------------------------------------------------------------------+
-void trail_orders(int type1, int type2) {
+void trail_orders(int type1, int type2)
+  {
    double price_max = 0;
    double price_min = DBL_MAX;
    double second_price_max = price_max;
    double second_price_min = price_min;
-   
-   for (int i = 0; i < OrdersTotal(); i++) {
-      if (OrderSelect(i, SELECT_BY_POS)) {
+
+   for(int i = 0; i < OrdersTotal(); i++)
+     {
+      if(OrderSelect(i, SELECT_BY_POS))
+        {
          double price = OrderOpenPrice();
-         
-         if (second_price_max < price) {
-            if (price_max < price) {
+
+         if(second_price_max < price)
+           {
+            if(price_max < price)
+              {
                second_price_max = price_max;
                price_max = price;
-            } else {
+              }
+            else
+              {
                second_price_max = price;
-            }
-         }
-         
-         if (price < second_price_min) {
-            if (price < price_min) {
+              }
+           }
+
+         if(price < second_price_min)
+           {
+            if(price < price_min)
+              {
                second_price_min = price_min;
                price_min = price;
-            } else {
+              }
+            else
+              {
                second_price_min = price;
-            }
-         }
-      }
-   }
-   
-   if (second_price_max == 0) {
+              }
+           }
+        }
+     }
+
+   if(second_price_max == 0)
+     {
       second_price_max = price_max;
-   }
-   if (second_price_min == DBL_MAX) {
+     }
+   if(second_price_min == DBL_MAX)
+     {
       second_price_min = price_min;
-   }
-   
+     }
+
    trail_price_buy = second_price_min - trailing_level * (second_price_min - price_min);
    trail_price_sell = second_price_max + trailing_level * (price_max - second_price_max);
    bool trail_buy = trail_price_buy < Bid;
    bool trail_sell = Ask < trail_price_sell;
-   
-   for (int i = 0; i < OrdersTotal(); i++) {
-      if (OrderSelect(i, SELECT_BY_POS)) {
+
+   for(int i = 0; i < OrdersTotal(); i++)
+     {
+      if(OrderSelect(i, SELECT_BY_POS))
+        {
          int type = OrderType();
-         if ((type == type1) || (type == type2)) {
+         if((type == type1) || (type == type2))
+           {
             double price = OrderOpenPrice();
             int ticket = OrderTicket();
-            switch (type) {
+            switch(type)
+              {
                case OP_BUY:
-                  if (trail_buy) {
+                  if(trail_buy)
+                    {
                      trail_order(ticket);
-                  }
+                    }
                   break;
                case OP_SELL:
-                  if (trail_sell) {
+                  if(trail_sell)
+                    {
                      trail_order(ticket);
-                  }
+                    }
                   break;
                default:
                   trail_order(ticket);
-            }
-         }
-      }
-   }
-}
+              }
+           }
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
 //| Update variables with every tick.                                |
