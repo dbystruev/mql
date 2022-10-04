@@ -10,19 +10,20 @@
 #property strict
 
 //---- input parameters
-extern  double  delta_init          =   0.00100;    // the initial price delta
 extern  double  delta_step          =   0.00100;    // by how much to increase the price delta on each step
 extern  double  delta_trailing      =   0.00050;    // stop loss trailing delta
-extern  double  lot_init            =   0.10;       // the lot size to set initially
-extern  double  lot_step            =   0.10;       // by how much to increase the lot size on each step
+extern  int     error_interval      =   60;         // the number of seconds to wait after any error
+extern  double  lot_init            =   -1;         // the lot size to set initially (use minimum lot if negative)
+extern  double  lot_step            =   -1;         // by how much to increase the lot size on each step (use lot_init if negative)
 extern  int     open_orders_max     =   5;          // the maximum number of open limit/stop orders
 extern  int     restart_interval    =   3600;       // restart interval in seconds if no market orders are present
 extern  bool    use_limit_orders    =   true;       // use limit (true) or stop (false) orders
 extern  bool    use_sell_orders     =   true;       // use sell (true) or buy (false) orders
 
 //---- variables
-double      delta_current;  // 0.00100, 0.00200, 0.00300, ...
 double      lot_current;    // 0.10, 0.20, 0.30, ...
+int         market_orders;  // the number of market orders
+datetime    no_error_time;  // the time when trading is allowed after the error 
 datetime    restart_time;   // the time of the next restart
 double      stop_loss;      // -1 or stop loss with positive profit
 
@@ -34,8 +35,7 @@ double      stop_loss;      // -1 or stop loss with positive profit
 //|     price above given rounded to delta init / step (e.g. 0.98100)   |
 //+---------------------------------------------------------------------+
 double above(double price) {
-    double delta = fmax(delta_init, delta_step);
-    return delta * ceil(price / delta);
+    return delta_step * ceil(price / delta_step);
 }
 
 //+---------------------------------------------------------------------+
@@ -46,8 +46,7 @@ double above(double price) {
 //|     price below given rounded to delta init / step (e.g. 0.98000)   |
 //+---------------------------------------------------------------------+
 double below(double price) {
-    double delta = fmax(delta_init, delta_step);
-    return delta * floor(price / delta);
+    return delta_step * floor(price / delta_step);
 }
 
 //+---------------------------------------------------------------------+
@@ -58,51 +57,11 @@ void delete_non_market_orders() {
     for (int i = OrdersTotal() - 1; 0 <= i; i--) {
         if (!OrderSelect(i, SELECT_BY_POS)) continue;
         if (is_market_order(OrderType())) continue;
-        if (!OrderDelete(OrderTicket())) {
-            Print(ErrorDescription(GetLastError()));
-        }
+        if (OrderDelete(OrderTicket())) continue;
+        Print("OrderDelete(", OrderTicket(), "): ", ErrorDescription(GetLastError()));
+        no_error_time = TimeCurrent() + error_interval;
     }
-}
-
-//+---------------------------------------------------------------------+
-//| Find a price above Ask or below Bid to place the first order        |
-//| Returns:                                                            |
-//|     price above Ask or below Bid to place the first order           |
-//+---------------------------------------------------------------------+
-double find_base_price() {
-    // use_limit_orders and use_sell_orders (SELL_LIMIT) -> Ask
-    // use_limit_orders, but do not use_sell_orders (BUY_LIMIT) -> Bid
-    // do not use_limit_orders, but use_sell_orders (SELL_STOP) -> Bid
-    // do not use_limit_orders, and do not use_sell_orders (BUY_STOP) -> Ask
-    return use_limit_orders == use_sell_orders ? above(Ask) : below(Bid);
-}
-
-//+---------------------------------------------------------------------+
-//| Find maximum delta between orders, taking base price into account   |
-//| Returns:                                                            |
-//|     Maximum delta between orders, taking base price into account    |
-//+---------------------------------------------------------------------+
-double find_max_delta() {
-    int orders_total = OrdersTotal();
-    if (orders_total < 1) return 0;
-    double prices[];
-    if (ArrayResize(prices, orders_total + 1) < 0) return 0;
-    prices[0] = find_base_price();
-    int prices_added = 1;
-    for (int i = 0; i < orders_total; i++) {
-        if (OrderSelect(i, SELECT_BY_POS)) {
-            prices[prices_added++] = OrderOpenPrice();
-        }
-    }
-    if (ArraySize(prices) != prices_added) {
-        ArrayResize(prices, prices_added);
-    }
-    ArraySort(prices);
-    double max_delta = 0;
-    for (int i = 1; i < prices_added; i++) {
-        max_delta = fmax(max_delta, prices[i] - prices[i - 1]);
-    }
-    return max_delta;
+    set_restart_time();
 }
 
 //+---------------------------------------------------------------------+
@@ -113,9 +72,8 @@ double find_max_delta() {
 double find_max_lot() {
     double max_lot = 0;
     for (int i = 0; i < OrdersTotal(); i++) {
-        if (OrderSelect(i, SELECT_BY_POS)) {
-            max_lot = fmax(max_lot, OrderLots());
-        }
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        max_lot = fmax(max_lot, OrderLots());
      }
     return max_lot;
 }
@@ -126,13 +84,12 @@ double find_max_lot() {
 //|     Maximum open price among all orders or Ask                      |
 //+---------------------------------------------------------------------+
 double find_max_price() {
-    double max_price = above(Ask);
+    double max_price = 0;
     for (int i = 0; i < OrdersTotal(); i++) {
-        if (OrderSelect(i, SELECT_BY_POS)) {
-            max_price = fmax(max_price, OrderOpenPrice());
-        }
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        max_price = fmax(max_price, OrderOpenPrice());
     }
-    return max_price;
+    return max_price == 0 ? above(Ask) : max_price;
 }
 
 //+---------------------------------------------------------------------+
@@ -141,13 +98,13 @@ double find_max_price() {
 //|     Minimum open price among all orders or Bid                      |
 //+---------------------------------------------------------------------+
 double find_min_price() {
-    double min_price = below(Bid);
+    const double max_double = 1.7976931348623158e+308;
+    double min_price = max_double;
     for (int i = 0; i < OrdersTotal(); i++) {
-        if (OrderSelect(i, SELECT_BY_POS)) {
-            min_price = fmin(min_price, OrderOpenPrice());
-        }
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        min_price = fmin(min_price, OrderOpenPrice());
     }
-    return min_price;
+    return min_price == max_double ? below(Bid) : min_price;
 }
 
 //+---------------------------------------------------------------------+
@@ -162,6 +119,16 @@ bool is_market_order(int order_type) {
 }
 
 //+---------------------------------------------------------------------+
+//| use_limit_orders and use_sell_orders (SELL_LIMIT) -> selling        |
+//| use_limit_orders, but don't use_sell_orders (BUY_LIMIT) -> buying   |
+//| don't use_limit_orders, but use_sell_orders (SELL_STOP) -> buying   |
+//| don't use_limit_orders, don't use_sell_orders (BUY_STOP) -> selling |  
+//+---------------------------------------------------------------------+
+bool is_selling() {
+    return use_limit_orders == use_sell_orders;
+}
+
+//+---------------------------------------------------------------------+
 //| Count the number of market orders (OP_BUY or OP_SELL)       |
 //| Returns:                                                            |
 //|     the number of market orders (OP_BUY or OP_SELL)         |
@@ -169,9 +136,9 @@ bool is_market_order(int order_type) {
 int market_orders_total() {
     int total = 0;
     for (int i = 0; i < OrdersTotal(); i++) {
-        if (is_market_order(OrderType())) {
-            total++;
-        }
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        if (!is_market_order(OrderType())) continue;
+        total++;
     }
     return total;
 }
@@ -198,11 +165,19 @@ int OnInit() {
 //| Expert tick function — called on every tick                         |
 //+---------------------------------------------------------------------+
 void OnTick() {
+    // Wait for the error to expire
+    if (TimeCurrent() < no_error_time) return;
+    // Reload non-market orders if there were no movements for a long time
     if (restart_time < TimeCurrent()) {
         if (market_orders_total() < 1) {
             delete_non_market_orders();
             setup_vars();
         }
+    }
+    // Check if all market orders were closed
+    if ((0 < market_orders) && (market_orders_total() < 1)) {
+        delete_non_market_orders();
+        setup_vars();
     }
     send_new_orders_if_needed();
     trail_orders_if_possible();
@@ -220,24 +195,33 @@ void send_new_orders_if_needed() {
         : use_sell_orders ? OP_SELLSTOP : OP_BUYSTOP;
     for (int i = 0; i < orders_to_open; i++) {
         double delta = OrdersTotal() * delta_step;
-        double lot = lot_current == 0 ? lot_init : lot_current + lot_step;
-        double price = use_limit_orders == use_sell_orders ? find_max_price() + delta : find_min_price() - delta;
+        double min_lot = fmax(lot_init, MarketInfo(Symbol(), MODE_MINLOT));
+        double step = lot_step < 0 ? min_lot : lot_step;
+        double lot = lot_current < min_lot ? min_lot : lot_current + step;
+        double price = is_selling() ? find_max_price() + delta : find_min_price() - delta;
         if (0 < OrderSend(Symbol(), order_type, lot, price, 0, 0, 0)) {
-            delta_current = delta;
             lot_current = lot;
         } else {
-            Print(ErrorDescription(GetLastError()));
+            Print("OrderSend(", Symbol(), ", ", order_type, ", ", lot, ", ", price, ", 0, 0, 0): ", ErrorDescription(GetLastError()));
+            no_error_time = TimeCurrent() + error_interval;
         }
     }
+}
+
+//+---------------------------------------------------------------------+
+//| Set the time when to delete / reload market orders                  |
+//+---------------------------------------------------------------------+
+void set_restart_time() {
+    restart_time = TimeCurrent() + restart_interval;
 }
 
 //+---------------------------------------------------------------------+
 //| Initial setup of variables — called from OnInit() once              |
 //+---------------------------------------------------------------------+
 void setup_vars() {
-    delta_current = find_max_delta();
     lot_current = find_max_lot();
-    restart_time = TimeCurrent() + restart_interval;
+    market_orders = market_orders_total();
+    no_error_time = TimeCurrent();
     stop_loss = -1;
 }
 
@@ -246,15 +230,16 @@ void setup_vars() {
 //+---------------------------------------------------------------------+
 void trail_orders_if_possible() {
     if (AccountEquity() < AccountBalance()) return;
-    if (use_limit_orders == use_sell_orders) {
-        double new_sl = Ask + delta_trailing;
+    if (market_orders_total() < 1) return;
+    if (is_selling()) {
+        double new_sl = above(Ask + delta_trailing);
         if (new_sl < stop_loss) {
-            update_stop_loss(stop_loss);
+            update_stop_loss(new_sl);
         }
     } else {
-        double new_sl = Bid - delta_trailing;
+        double new_sl = below(Bid - delta_trailing);
         if (stop_loss < new_sl) {
-            update_stop_loss(stop_loss);
+            update_stop_loss(new_sl);
         }
     }
 }
@@ -266,13 +251,13 @@ void trail_orders_if_possible() {
 //+---------------------------------------------------------------------+
 void update_stop_loss(double sl) {
     for (int i = 0; i < OrdersTotal(); i++) {
-        if (OrderSelect(i, SELECT_BY_POS)) {
-            if (is_market_order(OrderType())) {
-                if (!OrderModify(OrderTicket(), OrderOpenPrice(), sl, 0, 0)) {
-                    Print(ErrorDescription(GetLastError()));
-                }
-            }
-        }
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        if (!is_market_order(OrderType())) continue;
+        bool should_modify = (OrderStopLoss() == 0) || (is_selling() ? sl < OrderStopLoss() : OrderStopLoss() < sl);
+        if (!should_modify) continue;
+        if (OrderModify(OrderTicket(), OrderOpenPrice(), sl, 0, 0)) continue;
+        Print("OrderModify(", OrderTicket(), ", ", OrderOpenPrice(), ", ", sl, ", 0, 0): ", ErrorDescription(GetLastError()));
+        no_error_time = TimeCurrent() + error_interval;
     }
 }
 
@@ -282,12 +267,13 @@ void update_stop_loss(double sl) {
 void update_vars() {
     if (AccountBalance() < AccountEquity()) {
         if (stop_loss < 0) {
-            stop_loss = use_limit_orders == use_sell_orders ? Bid : Ask;
+            stop_loss = is_selling() ? Bid : Ask;
         } else {
-            stop_loss = use_limit_orders == use_sell_orders ? fmax(stop_loss, Bid) : fmin(stop_loss, Ask);
+            stop_loss = is_selling() ? fmax(stop_loss, Bid) : fmin(stop_loss, Ask);
         }
     }
-    if (market_orders_total() < 1) {
+    market_orders = market_orders_total();
+    if (market_orders < 1) {
         setup_vars();
     }
 }
