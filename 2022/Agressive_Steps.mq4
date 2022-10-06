@@ -4,7 +4,7 @@
 //|                                     https://github.com/dbystruev |
 //+------------------------------------------------------------------+
 #include <stdlib.mqh>
-#property copyright "Copyright © 2022, Denis Bystruev, 2–3 Oct 2022"
+#property copyright "Copyright © 2022, Denis Bystruev, 2–5 Oct 2022"
 #property link      "https://github.com/dbystruev"
 #property version   "22.10"
 #property strict
@@ -25,28 +25,30 @@ double      lot_current;    // 0.10, 0.20, 0.30, ...
 int         market_orders;  // the number of market orders
 datetime    no_error_time;  // the time when trading is allowed after the error 
 datetime    restart_time;   // the time of the next restart
-double      stop_loss;      // -1 or stop loss with positive profit
+double      profitable_sl;  // -1 or stop loss with positive profit
 
 //+---------------------------------------------------------------------+
-//| Get price above given price which is rounded to delta init / step   |
+//| Get the price above given which is rounded to given delta           |
 //| Parameters:                                                         |
 //|     price — non-rounded price (usually Ask, e.g. 0.98053)           |
+//|     delta — delta to which the price should be rounded (e.g. 0.001) |
 //| Returns:                                                            |
-//|     price above given rounded to delta init / step (e.g. 0.98100)   |
+//|     price above given rounded to given delta (e.g. 0.98100)         |
 //+---------------------------------------------------------------------+
-double above(double price) {
-    return delta_step * ceil(price / delta_step);
+double above(double price, double delta) {
+    return delta * ceil(price / delta);
 }
 
 //+---------------------------------------------------------------------+
-//| Get price below given price which is rounded to delta init / step   |
+//| Get the price below given which is rounded to given delta           |
 //| Parameters:                                                         |
 //|     price — non-rounded price (usually Bid, e.g. 0.98035)           |
+//|     delta — delta to which the price should be rounded (e.g. 0.001) |
 //| Returns:                                                            |
-//|     price below given rounded to delta init / step (e.g. 0.98000)   |
+//|     price below given rounded to given delta (e.g. 0.98000)         |
 //+---------------------------------------------------------------------+
-double below(double price) {
-    return delta_step * floor(price / delta_step);
+double below(double price, double delta) {
+    return delta * floor(price / delta);
 }
 
 //+---------------------------------------------------------------------+
@@ -89,7 +91,7 @@ double find_max_price() {
         if (!OrderSelect(i, SELECT_BY_POS)) continue;
         max_price = fmax(max_price, OrderOpenPrice());
     }
-    return max_price == 0 ? above(Ask) : max_price;
+    return max_price == 0 ? Ask : max_price;
 }
 
 //+---------------------------------------------------------------------+
@@ -104,7 +106,7 @@ double find_min_price() {
         if (!OrderSelect(i, SELECT_BY_POS)) continue;
         min_price = fmin(min_price, OrderOpenPrice());
     }
-    return min_price == max_double ? below(Bid) : min_price;
+    return min_price == max_double ? Bid : min_price;
 }
 
 //+---------------------------------------------------------------------+
@@ -116,16 +118,6 @@ double find_min_price() {
 //+---------------------------------------------------------------------+
 bool is_market_order(int order_type) {
     return (order_type == OP_BUY) || (order_type == OP_SELL);
-}
-
-//+---------------------------------------------------------------------+
-//| use_limit_orders and use_sell_orders (SELL_LIMIT) -> selling        |
-//| use_limit_orders, but don't use_sell_orders (BUY_LIMIT) -> buying   |
-//| don't use_limit_orders, but use_sell_orders (SELL_STOP) -> buying   |
-//| don't use_limit_orders, don't use_sell_orders (BUY_STOP) -> selling |  
-//+---------------------------------------------------------------------+
-bool is_selling() {
-    return use_limit_orders == use_sell_orders;
 }
 
 //+---------------------------------------------------------------------+
@@ -141,6 +133,13 @@ int market_orders_total() {
         total++;
     }
     return total;
+}
+
+//+---------------------------------------------------------------------+
+//| Calculate the new stop loss for the orders above Ask or below Bid   |
+//+---------------------------------------------------------------------+
+double new_stop_loss() {
+    return use_sell_orders ? above(Ask + delta_trailing, delta_trailing) : below(Bid - delta_trailing, delta_trailing);
 }
 
 //+---------------------------------------------------------------------+
@@ -165,6 +164,7 @@ int OnInit() {
 //| Expert tick function — called on every tick                         |
 //+---------------------------------------------------------------------+
 void OnTick() {
+    show_comments();
     // Wait for the error to expire
     if (TimeCurrent() < no_error_time) return;
     // Reload non-market orders if there were no movements for a long time
@@ -180,8 +180,34 @@ void OnTick() {
         setup_vars();
     }
     send_new_orders_if_needed();
-    trail_orders_if_possible();
     update_vars();
+    trail_orders_if_possible();
+}
+
+//+---------------------------------------------------------------------+
+//| Convert order type to string                                        |
+//| Parameters:                                                         |
+//|     - order_type — order type                                       |
+//| Returns:                                                            |
+//|     string representing order type                                  |
+//+---------------------------------------------------------------------+
+string OrderTypeToString(int order_type) {
+    switch (order_type) {
+        case OP_BUY:
+            return "BUY";
+        case OP_BUYLIMIT:
+            return "BUY LIMIT";
+        case OP_BUYSTOP:
+            return "BUY STOP";
+        case OP_SELL:
+            return "SELL";
+        case OP_SELLLIMIT:
+            return "SELL LIMIT";
+        case OP_SELLSTOP:
+            return "SELL STOP";
+        default:
+            return "unknown";
+    }
 }
 
 //+---------------------------------------------------------------------+
@@ -198,7 +224,13 @@ void send_new_orders_if_needed() {
         double min_lot = fmax(lot_init, MarketInfo(Symbol(), MODE_MINLOT));
         double step = lot_step < 0 ? min_lot : lot_step;
         double lot = lot_current < min_lot ? min_lot : lot_current + step;
-        double price = is_selling() ? find_max_price() + delta : find_min_price() - delta;
+        // use_limit_orders and use_sell_orders (SELL_LIMIT) -> above
+        // use_limit_orders, but don't use_sell_orders (BUY_LIMIT) -> below
+        // don't use_limit_orders, but use_sell_orders (SELL_STOP) -> below
+        // don't use_limit_orders, don't use_sell_orders (BUY_STOP) -> above
+        double price = use_limit_orders == use_sell_orders
+            ? above(find_max_price() + delta, delta_step)
+            : below(find_min_price() - delta, delta_step);
         if (0 < OrderSend(Symbol(), order_type, lot, price, 0, 0, 0)) {
             lot_current = lot;
         } else {
@@ -222,23 +254,53 @@ void setup_vars() {
     lot_current = find_max_lot();
     market_orders = market_orders_total();
     no_error_time = TimeCurrent();
-    stop_loss = -1;
+    profitable_sl = -1;
+}
+
+//+---------------------------------------------------------------------+
+//| Show comments information for visual debugging                      |
+//+---------------------------------------------------------------------+
+void show_comments() {
+    string comment = "";
+    if (TimeCurrent() < restart_time) {
+        comment = "Refresh in " + TimeToString(restart_time - TimeCurrent(), TIME_SECONDS) + "\n";
+    }
+    comment += "Balance: " + DoubleToString(AccountBalance(), 2);
+    comment += ", Equity: " + DoubleToString(AccountEquity(), 2);
+    comment += ", Profit: " + DoubleToString(AccountEquity() - AccountBalance(), 2);
+    comment += "\nProfitable SL: " + DoubleToString(profitable_sl, Digits);
+    comment += ", new SL: " + DoubleToString(new_stop_loss(), Digits);
+    double delta = (profitable_sl - new_stop_loss()) * (use_sell_orders ? 1 : -1);
+    if (0 < profitable_sl) {
+        comment += ", delta: " + DoubleToString(delta, Digits);
+    }
+    for (int i = 0; i < OrdersTotal(); i++) {
+        if (!OrderSelect(i, SELECT_BY_POS)) continue;
+        comment += "\n" + OrderTypeToString(OrderType());
+        comment += " " + DoubleToString(OrderLots(), 2);
+        comment += " at " + DoubleToString(OrderOpenPrice(), Digits);
+        comment += ", SL " + DoubleToString(OrderStopLoss(), Digits);
+        comment += ", profit " + DoubleToString(OrderProfit(), 2);
+    }
+    // Delay in visual mode
+    //int delay = IsVisualMode() && (0 < delta) ? 100000 : 1;
+    int delay = IsVisualMode() && (0 < market_orders_total()) && (delta < 0) ? 100000 : 1;
+    for (int i = 0; i < delay; i++) Comment(comment);
 }
 
 //+---------------------------------------------------------------------+
 //| If account equity is above account balance, change orders' stops    |
 //+---------------------------------------------------------------------+
 void trail_orders_if_possible() {
-    if (AccountEquity() < AccountBalance()) return;
+    if ((AccountEquity() < AccountBalance()) || (profitable_sl < 0)) return;
     if (market_orders_total() < 1) return;
-    if (is_selling()) {
-        double new_sl = above(Ask + delta_trailing);
-        if (new_sl < stop_loss) {
+    double new_sl = new_stop_loss();
+    if (use_sell_orders) {
+        if (new_sl < profitable_sl) {
             update_stop_loss(new_sl);
         }
     } else {
-        double new_sl = below(Bid - delta_trailing);
-        if (stop_loss < new_sl) {
+        if (profitable_sl < new_sl) {
             update_stop_loss(new_sl);
         }
     }
@@ -253,7 +315,7 @@ void update_stop_loss(double sl) {
     for (int i = 0; i < OrdersTotal(); i++) {
         if (!OrderSelect(i, SELECT_BY_POS)) continue;
         if (!is_market_order(OrderType())) continue;
-        bool should_modify = (OrderStopLoss() == 0) || (is_selling() ? sl < OrderStopLoss() : OrderStopLoss() < sl);
+        bool should_modify = (OrderStopLoss() == 0) || (use_sell_orders ? sl < OrderStopLoss() : OrderStopLoss() < sl);
         if (!should_modify) continue;
         if (OrderModify(OrderTicket(), OrderOpenPrice(), sl, 0, 0)) continue;
         Print("OrderModify(", OrderTicket(), ", ", OrderOpenPrice(), ", ", sl, ", 0, 0): ", ErrorDescription(GetLastError()));
@@ -266,10 +328,10 @@ void update_stop_loss(double sl) {
 //+---------------------------------------------------------------------+
 void update_vars() {
     if (AccountBalance() < AccountEquity()) {
-        if (stop_loss < 0) {
-            stop_loss = is_selling() ? Bid : Ask;
+        if (profitable_sl < 0) {
+            profitable_sl = use_sell_orders ? Ask : Bid;
         } else {
-            stop_loss = is_selling() ? fmax(stop_loss, Bid) : fmin(stop_loss, Ask);
+            profitable_sl = use_sell_orders ? fmax(profitable_sl, Ask) : fmin(profitable_sl, Bid);
         }
     }
     market_orders = market_orders_total();
